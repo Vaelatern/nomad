@@ -1,6 +1,7 @@
 package structs
 
 import (
+	"reflect"
 	"time"
 
 	"github.com/hashicorp/nomad/helper/uuid"
@@ -56,6 +57,11 @@ func (sv *SecureVariable) Copy() *SecureVariable {
 		out.EncryptedData = sv.EncryptedData.Copy()
 	}
 	return &out
+}
+
+func (sv SecureVariable) Equals(sv2 SecureVariable) bool {
+	// FIXME: This should be a smarter equality check
+	return reflect.DeepEqual(sv, sv2)
 }
 
 func (sv SecureVariable) Stub() SecureVariableStub {
