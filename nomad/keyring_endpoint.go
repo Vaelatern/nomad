@@ -42,9 +42,17 @@ func (k *Keyring) Rotate(args *structs.KeyringRotateRootKeyRequest, reply *struc
 		args.Algorithm = structs.EncryptionAlgorithmXChaCha20
 	}
 
-	meta := structs.NewRootKeyMeta()
-	meta.Algorithm = args.Algorithm
-	meta.Active = true
+	rootKey, err := k.encrypter.GenerateNewRootKey(args.Algorithm)
+	if err != nil {
+		return err
+	}
+
+	rootKey.Meta.Active = true
+
+	err = k.encrypter.PersistRootKey(rootKey)
+	if err != nil {
+		return err
+	}
 
 	// TODO: have the Encrypter generate and persist the actual key
 	// material. this is just here to silence the structcheck lint
@@ -54,7 +62,7 @@ func (k *Keyring) Rotate(args *structs.KeyringRotateRootKeyRequest, reply *struc
 
 	// Update metadata via Raft so followers can retrieve this key
 	req := structs.KeyringUpdateRootKeyMetaRequest{
-		RootKeyMeta:  meta,
+		RootKeyMeta:  rootKey.Meta,
 		WriteRequest: args.WriteRequest,
 	}
 	out, index, err := k.srv.raftApply(structs.RootKeyMetaUpsertRequestType, req)
@@ -64,7 +72,7 @@ func (k *Keyring) Rotate(args *structs.KeyringRotateRootKeyRequest, reply *struc
 	if err, ok := out.(error); ok && err != nil {
 		return err
 	}
-	reply.Key = meta
+	reply.Key = rootKey.Meta
 	reply.Index = index
 	return nil
 }

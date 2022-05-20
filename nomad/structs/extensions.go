@@ -1,6 +1,7 @@
 package structs
 
 import (
+	"encoding/base64"
 	"reflect"
 )
 
@@ -12,6 +13,8 @@ var (
 		reflect.TypeOf(&Node{}):      nodeExt,
 		reflect.TypeOf(CSIVolume{}):  csiVolumeExt,
 		reflect.TypeOf(&CSIVolume{}): csiVolumeExt,
+		reflect.TypeOf(&RootKey{}):   rootKeyExt,
+		reflect.TypeOf(RootKey{}):    rootKeyExt,
 	}
 )
 
@@ -75,4 +78,24 @@ func csiVolumeExt(v interface{}) interface{} {
 	apiVol.Secrets = nil
 
 	return apiVol
+}
+
+// rootKeyExt does the base64 encoding of the key material before we
+// serialize root key
+func rootKeyExt(v interface{}) interface{} {
+	key := v.(*RootKey)
+
+	encodedKey := make([]byte, base64.StdEncoding.EncodedLen(len(key.Key)))
+	base64.StdEncoding.Encode(encodedKey, key.Key)
+
+	// we can use RootKeyMeta here without indirection so long as its
+	// fields exactly match api.RootKeyMeta; if that changes we'll
+	// need to rework this to be similar to CSIVolume and Node above.
+	return &struct {
+		Meta *RootKeyMeta
+		Key  string
+	}{
+		Meta: key.Meta,
+		Key:  string(encodedKey),
+	}
 }
