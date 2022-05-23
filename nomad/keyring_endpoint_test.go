@@ -211,7 +211,6 @@ func TestKeyringEndpoint_Rotate(t *testing.T) {
 	defer shutdown()
 	testutil.WaitForLeader(t, srv.RPC)
 	codec := rpcClient(t, srv)
-	//	id := uuid.Generate()
 
 	// Setup an existing key
 	key, err := structs.NewRootKey(structs.EncryptionAlgorithmXChaCha20)
@@ -259,14 +258,27 @@ func TestKeyringEndpoint_Rotate(t *testing.T) {
 
 	require.Greater(t, listResp.Index, updateResp.Index)
 	require.Len(t, listResp.Keys, 2)
+
+	var newID string
 	for _, keyMeta := range listResp.Keys {
 		if keyMeta.KeyID == id {
 			require.False(t, keyMeta.Active, "expected old key to be inactive")
 		} else {
 			require.True(t, keyMeta.Active, "expected new key to be inactive")
+			newID = keyMeta.KeyID
 		}
 	}
 
-	// TODO: verify that Encrypter has been updated
+	getReq := &structs.KeyringGetRootKeyRequest{
+		KeyID: newID,
+		QueryOptions: structs.QueryOptions{
+			Region: "global",
+		},
+	}
+	var getResp structs.KeyringGetRootKeyResponse
+	err = msgpackrpc.CallWithCodec(codec, "Keyring.Get", getReq, &getResp)
+	require.NoError(t, err)
 
+	gotKey := getResp.Key
+	require.Len(t, gotKey.Key, 32)
 }
