@@ -21,6 +21,7 @@ import (
 	"github.com/hashicorp/nomad/nomad/structs"
 )
 
+// Encrypter is the keyring for secure variables.
 type Encrypter struct {
 	lock         sync.RWMutex
 	keys         map[string]*structs.RootKey // map of key IDs to key material
@@ -28,14 +29,18 @@ type Encrypter struct {
 	keystorePath string
 }
 
-// TODO: needs Config parameter and error return
-func NewEncrypter() *Encrypter {
-	keystorePath := os.TempDir()
+// NewEncrypter loads or creates a new local keystore and returns an
+// encryption keyring with the keys it finds.
+func NewEncrypter(keystorePath string) (*Encrypter, error) {
+	err := os.MkdirAll(keystorePath, 0700)
+	if err != nil {
+		return nil, err
+	}
 	encrypter, err := encrypterFromKeystore(keystorePath)
 	if err != nil {
-		panic(err) // TODO
+		return nil, err
 	}
-	return encrypter
+	return encrypter, nil
 }
 
 func encrypterFromKeystore(keystoreDirectory string) (*Encrypter, error) {
