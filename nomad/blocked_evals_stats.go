@@ -1,8 +1,10 @@
 package nomad
 
 import (
+	"fmt"
 	"time"
 
+	"github.com/davecgh/go-spew/spew"
 	"github.com/hashicorp/nomad/nomad/structs"
 )
 
@@ -21,7 +23,17 @@ type BlockedStats struct {
 
 	// BlockedResources stores the amount of resources requested by blocked
 	// evaluations.
-	BlockedResources BlockedResourcesStats
+	BlockedResources *BlockedResourcesStats
+}
+
+// node stores information related to nodes.
+type node struct {
+	dc    string
+	class string
+}
+
+func (n node) String() string {
+	return fmt.Sprintf("%s/%s", n.dc, n.class)
 }
 
 // NewBlockedStats returns a new BlockedStats.
@@ -36,7 +48,19 @@ func NewBlockedStats() *BlockedStats {
 func (b *BlockedStats) Block(eval *structs.Evaluation) {
 	b.TotalBlocked++
 	resourceStats := generateResourceStats(eval)
+
+	fmt.Println("Block, id:", eval.ID, "total:", b.TotalBlocked)
+
+	fmt.Println("block, resourceStats:")
+	spew.Dump(resourceStats.ByJob)
+
+	fmt.Println("block, BlockedResources before Add:")
+	spew.Dump(b.BlockedResources.ByJob)
+
 	b.BlockedResources = b.BlockedResources.Add(resourceStats)
+
+	fmt.Println("block, BlockedResources after Add:")
+	spew.Dump(b.BlockedResources.ByJob)
 }
 
 // Unblock updates the stats for the blocked eval tracker with the details of the
@@ -44,12 +68,24 @@ func (b *BlockedStats) Block(eval *structs.Evaluation) {
 func (b *BlockedStats) Unblock(eval *structs.Evaluation) {
 	b.TotalBlocked--
 	resourceStats := generateResourceStats(eval)
+
+	fmt.Println("Unblock, id:", eval.ID, "total:", b.TotalBlocked)
+
+	fmt.Println("unblock, resourceStats:")
+	spew.Dump(resourceStats.ByJob)
+
+	fmt.Println("unblock, BlockedResources before Subtract:")
+	spew.Dump(b.BlockedResources.ByJob)
+
 	b.BlockedResources = b.BlockedResources.Subtract(resourceStats)
+
+	fmt.Println("unblock, BlockedResources after Subtract:")
+	spew.Dump(b.BlockedResources.ByJob)
 }
 
 // prune deletes any key zero metric values older than the cutoff.
 func (b *BlockedStats) prune(cutoff time.Time) {
-	shouldPrune := func(s BlockedResourcesSummary) bool {
+	shouldPrune := func(s *BlockedResourcesSummary) bool {
 		return s.Timestamp.Before(cutoff) && s.IsZero()
 	}
 
@@ -59,80 +95,97 @@ func (b *BlockedStats) prune(cutoff time.Time) {
 		}
 	}
 
-	for k, v := range b.BlockedResources.ByNodeInfo {
+	for k, v := range b.BlockedResources.ByNode {
 		if shouldPrune(v) {
-			delete(b.BlockedResources.ByNodeInfo, k)
+			delete(b.BlockedResources.ByNode, k)
 		}
 	}
 }
 
 // generateResourceStats returns a summary of the resources requested by the
 // input evaluation.
-func generateResourceStats(eval *structs.Evaluation) BlockedResourcesStats {
+func generateResourceStats(eval *structs.Evaluation) *BlockedResourcesStats {
 	dcs := make(map[string]struct{})
 	classes := make(map[string]struct{})
 
-	resources := BlockedResourcesSummary{
+	resources := &BlockedResourcesSummary{
 		Timestamp: time.Now().UTC(),
 	}
 
+	fmt.Println("GRS id:", eval.ID)
+
 	for _, allocMetrics := range eval.FailedTGAllocs {
+
+		fmt.Println(" nodes avail:", allocMetrics.NodesAvailable)
+
 		for dc := range allocMetrics.NodesAvailable {
+			fmt.Println(" set dc:", dc)
 			dcs[dc] = struct{}{}
 		}
 
+		fmt.Println(" class exh:", allocMetrics.ClassExhausted)
+
 		for class := range allocMetrics.ClassExhausted {
+			fmt.Println(" set class:", class)
 			classes[class] = struct{}{}
 		}
+
+		fmt.Println(" res exh:", allocMetrics.ResourcesExhausted)
 
 		for _, r := range allocMetrics.ResourcesExhausted {
 			resources.CPU += r.CPU
 			resources.MemoryMB += r.MemoryMB
+
+			fmt.Println("add cpu:", r.CPU, "mem:", r.MemoryMB, "tot_cpu:", resources.CPU, "tot_mem:", resources.MemoryMB)
 		}
 	}
 
-	byJob := make(map[structs.NamespacedID]BlockedResourcesSummary)
-	byJob[structs.NewNamespacedID(eval.JobID, eval.Namespace)] = resources
+	byJob := make(map[structs.NamespacedID]*BlockedResourcesSummary)
+	nsID := structs.NewNamespacedID(eval.JobID, eval.Namespace)
+	byJob[nsID] = resources
 
-	byNodeInfo := make(map[NodeInfo]BlockedResourcesSummary)
+	fmt.Println("ASSIGN", nsID)
+	spew.Dump(resources)
+
+	byNodeInfo := make(map[node]*BlockedResourcesSummary)
 	for dc := range dcs {
 		for class := range classes {
-			k := NodeInfo{dc, class}
+			k := node{dc: dc, class: class}
 			byNodeInfo[k] = resources
 		}
 	}
 
-	return BlockedResourcesStats{
-		ByJob:      byJob,
-		ByNodeInfo: byNodeInfo,
+	return &BlockedResourcesStats{
+		ByJob:  byJob,
+		ByNode: byNodeInfo,
 	}
 }
 
-// BlockedResourcesStats stores resources requested by block evaluations
-// split into different dimensions.
+// BlockedResourcesStats stores resources requested by blocked evaluations,
+// tracked both by job and by node.
 type BlockedResourcesStats struct {
-	ByJob      map[structs.NamespacedID]BlockedResourcesSummary
-	ByNodeInfo map[NodeInfo]BlockedResourcesSummary
+	ByJob  map[structs.NamespacedID]*BlockedResourcesSummary
+	ByNode map[node]*BlockedResourcesSummary
 }
 
 // NewBlockedResourcesStats returns a new BlockedResourcesStats.
-func NewBlockedResourcesStats() BlockedResourcesStats {
-	return BlockedResourcesStats{
-		ByJob:      make(map[structs.NamespacedID]BlockedResourcesSummary),
-		ByNodeInfo: make(map[NodeInfo]BlockedResourcesSummary),
+func NewBlockedResourcesStats() *BlockedResourcesStats {
+	return &BlockedResourcesStats{
+		ByJob:  make(map[structs.NamespacedID]*BlockedResourcesSummary),
+		ByNode: make(map[node]*BlockedResourcesSummary),
 	}
 }
 
 // Copy returns a deep copy of the blocked resource stats.
-func (b BlockedResourcesStats) Copy() BlockedResourcesStats {
+func (b *BlockedResourcesStats) Copy() *BlockedResourcesStats {
 	result := NewBlockedResourcesStats()
 
 	for k, v := range b.ByJob {
-		result.ByJob[k] = v
+		result.ByJob[k] = v.Copy()
 	}
 
-	for k, v := range b.ByNodeInfo {
-		result.ByNodeInfo[k] = v
+	for k, v := range b.ByNode {
+		result.ByNode[k] = v.Copy()
 	}
 
 	return result
@@ -140,15 +193,15 @@ func (b BlockedResourcesStats) Copy() BlockedResourcesStats {
 
 // Add returns a new BlockedResourcesStats with the values set to the current
 // resource values plus the input.
-func (b BlockedResourcesStats) Add(a BlockedResourcesStats) BlockedResourcesStats {
+func (b *BlockedResourcesStats) Add(a *BlockedResourcesStats) *BlockedResourcesStats {
 	result := b.Copy()
 
 	for k, v := range a.ByJob {
 		result.ByJob[k] = b.ByJob[k].Add(v)
 	}
 
-	for k, v := range a.ByNodeInfo {
-		result.ByNodeInfo[k] = b.ByNodeInfo[k].Add(v)
+	for k, v := range a.ByNode {
+		result.ByNode[k] = b.ByNode[k].Add(v)
 	}
 
 	return result
@@ -156,24 +209,18 @@ func (b BlockedResourcesStats) Add(a BlockedResourcesStats) BlockedResourcesStat
 
 // Subtract returns a new BlockedResourcesStats with the values set to the
 // current resource values minus the input.
-func (b BlockedResourcesStats) Subtract(a BlockedResourcesStats) BlockedResourcesStats {
+func (b *BlockedResourcesStats) Subtract(a *BlockedResourcesStats) *BlockedResourcesStats {
 	result := b.Copy()
 
 	for k, v := range a.ByJob {
 		result.ByJob[k] = b.ByJob[k].Subtract(v)
 	}
 
-	for k, v := range a.ByNodeInfo {
-		result.ByNodeInfo[k] = b.ByNodeInfo[k].Subtract(v)
+	for k, v := range a.ByNode {
+		result.ByNode[k] = b.ByNode[k].Subtract(v)
 	}
 
 	return result
-}
-
-// NodeInfo stores information related to nodes.
-type NodeInfo struct {
-	Datacenter string
-	NodeClass  string
 }
 
 // BlockedResourcesSummary stores resource values for blocked evals.
@@ -183,10 +230,26 @@ type BlockedResourcesSummary struct {
 	MemoryMB  int
 }
 
+// Copy creates a deep copy of b.
+//
+// b must not be nil.
+func (b *BlockedResourcesSummary) Copy() *BlockedResourcesSummary {
+	return &BlockedResourcesSummary{
+		Timestamp: b.Timestamp,
+		CPU:       b.CPU,
+		MemoryMB:  b.MemoryMB,
+	}
+}
+
 // Add returns a new BlockedResourcesSummary with each resource set to the
 // current value plus the input.
-func (b BlockedResourcesSummary) Add(a BlockedResourcesSummary) BlockedResourcesSummary {
-	return BlockedResourcesSummary{
+//
+// If b is nil, a copy of a is returned (i.e. 0 + a == a).
+func (b *BlockedResourcesSummary) Add(a *BlockedResourcesSummary) *BlockedResourcesSummary {
+	if b == nil {
+		return a.Copy()
+	}
+	return &BlockedResourcesSummary{
 		Timestamp: a.Timestamp,
 		CPU:       b.CPU + a.CPU,
 		MemoryMB:  b.MemoryMB + a.MemoryMB,
@@ -195,8 +258,10 @@ func (b BlockedResourcesSummary) Add(a BlockedResourcesSummary) BlockedResources
 
 // Subtract returns a new BlockedResourcesSummary with each resource set to the
 // current value minus the input.
-func (b BlockedResourcesSummary) Subtract(a BlockedResourcesSummary) BlockedResourcesSummary {
-	return BlockedResourcesSummary{
+//
+// b must not be nil.
+func (b *BlockedResourcesSummary) Subtract(a *BlockedResourcesSummary) *BlockedResourcesSummary {
+	return &BlockedResourcesSummary{
 		Timestamp: a.Timestamp,
 		CPU:       b.CPU - a.CPU,
 		MemoryMB:  b.MemoryMB - a.MemoryMB,
@@ -204,6 +269,8 @@ func (b BlockedResourcesSummary) Subtract(a BlockedResourcesSummary) BlockedReso
 }
 
 // IsZero returns true if all resource values are zero.
-func (b BlockedResourcesSummary) IsZero() bool {
+//
+// b must not be nil.
+func (b *BlockedResourcesSummary) IsZero() bool {
 	return b.CPU == 0 && b.MemoryMB == 0
 }

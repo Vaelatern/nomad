@@ -1,157 +1,287 @@
 package nomad
 
 import (
-	"fmt"
-	"math/rand"
-	"reflect"
 	"testing"
-	"testing/quick"
 	"time"
 
-	"github.com/hashicorp/nomad/ci"
-	"github.com/hashicorp/nomad/nomad/mock"
 	"github.com/hashicorp/nomad/nomad/structs"
+	"github.com/stretchr/testify/require"
 )
 
-// testBlockedEvalsRandomBlockedEval wraps an eval that is randomly generated.
-type testBlockedEvalsRandomBlockedEval struct {
-	eval *structs.Evaluation
+func now(year int) time.Time {
+	return time.Date(2000+year, 1, 2, 3, 4, 5, 6, time.UTC)
 }
 
-// Generate returns a random eval.
-func (t testBlockedEvalsRandomBlockedEval) Generate(rand *rand.Rand, _ int) reflect.Value {
-	resourceTypes := []string{"cpu", "memory"}
-
-	// Start with a mock eval.
-	e := mock.BlockedEval()
-
-	// Get how many task groups, datacenters and node classes to generate.
-	// Add 1 to avoid 0.
-	tgCount := rand.Intn(10) + 1
-	dcCount := rand.Intn(3) + 1
-	nodeClassCount := rand.Intn(3) + 1
-
-	failedTGAllocs := map[string]*structs.AllocMetric{}
-
-	for tg := 1; tg <= tgCount; tg++ {
-		tgName := fmt.Sprintf("group-%d", tg)
-
-		// Get which resource type to use for this task group.
-		// Nomad stops at the first dimension that is exhausted, so only 1 is
-		// added per task group.
-		i := rand.Int() % len(resourceTypes)
-		resourceType := resourceTypes[i]
-
-		failedTGAllocs[tgName] = &structs.AllocMetric{
-			DimensionExhausted: map[string]int{
-				resourceType: 1,
-			},
-			NodesAvailable: map[string]int{},
-			ClassExhausted: map[string]int{},
-		}
-
-		for dc := 1; dc <= dcCount; dc++ {
-			dcName := fmt.Sprintf("dc%d", dc)
-			failedTGAllocs[tgName].NodesAvailable[dcName] = 1
-		}
-
-		for nc := 1; nc <= nodeClassCount; nc++ {
-			nodeClassName := fmt.Sprintf("node-class-%d", nc)
-			failedTGAllocs[tgName].ClassExhausted[nodeClassName] = 1
-		}
-
-		// Generate resources for each task.
-		taskCount := rand.Intn(5) + 1
-		resourcesExhausted := map[string]*structs.Resources{}
-
-		for t := 1; t <= taskCount; t++ {
-			task := fmt.Sprintf("task-%d", t)
-			resourcesExhausted[task] = &structs.Resources{}
-
-			resourceAmount := rand.Intn(1000)
-			switch resourceType {
-			case "cpu":
-				resourcesExhausted[task].CPU = resourceAmount
-			case "memory":
-				resourcesExhausted[task].MemoryMB = resourceAmount
-			}
-		}
-		failedTGAllocs[tgName].ResourcesExhausted = resourcesExhausted
+func TestBlockResourceSummary_Copy(t *testing.T) {
+	a := &BlockedResourcesSummary{
+		Timestamp: now(1),
+		CPU:       100,
+		MemoryMB:  200,
 	}
-	e.FailedTGAllocs = failedTGAllocs
-	t.eval = e
-	return reflect.ValueOf(t)
+
+	c := a.Copy()
+	c.Timestamp = now(2)
+	c.CPU = 333
+	c.MemoryMB = 444
+
+	// a not modified
+	require.Equal(t, now(1), a.Timestamp)
+	require.Equal(t, 100, a.CPU)
+	require.Equal(t, 200, a.MemoryMB)
 }
 
-// clearTimestampFromBlockedResourceStats set timestamp metrics to zero to
-// avoid invalid comparisons.
-func clearTimestampFromBlockedResourceStats(b *BlockedResourcesStats) {
-	for k, v := range b.ByJob {
-		v.Timestamp = time.Time{}
-		b.ByJob[k] = v
+func TestBlockResourceSummary_Add(t *testing.T) {
+	now1 := now(1)
+	now2 := now(2)
+	a := &BlockedResourcesSummary{
+		Timestamp: now1,
+		CPU:       600,
+		MemoryMB:  256,
 	}
-	for k, v := range b.ByNodeInfo {
-		v.Timestamp = time.Time{}
-		b.ByNodeInfo[k] = v
+
+	b := &BlockedResourcesSummary{
+		Timestamp: now2,
+		CPU:       250,
+		MemoryMB:  128,
 	}
+
+	result := a.Add(b)
+
+	// a not modified
+	require.Equal(t, 600, a.CPU)
+	require.Equal(t, 256, a.MemoryMB)
+	require.Equal(t, now1, a.Timestamp)
+
+	// b not modified
+	require.Equal(t, 250, b.CPU)
+	require.Equal(t, 128, b.MemoryMB)
+	require.Equal(t, now2, b.Timestamp)
+
+	// result is a + b, using timestamp from b
+	require.Equal(t, 850, result.CPU)
+	require.Equal(t, 384, result.MemoryMB)
+	require.Equal(t, now2, result.Timestamp)
 }
 
-// TestBlockedEvalsStats_BlockedResources generates random evals and processes
-// them using the expected code paths and a manual check of the expeceted result.
-func TestBlockedEvalsStats_BlockedResources(t *testing.T) {
-	ci.Parallel(t)
-	blocked, _ := testBlockedEvals(t)
-
-	// evalHistory stores all evals generated during the test.
-	evalHistory := []*structs.Evaluation{}
-
-	// blockedEvals keeps track if evals are blocked or unblocked.
-	blockedEvals := map[string]bool{}
-
-	// blockAndUntrack processes the generated evals in order using a
-	// BlockedEvals instance.
-	blockAndUntrack := func(testEval testBlockedEvalsRandomBlockedEval, block bool, unblockIdx uint16) BlockedResourcesStats {
-		if block || len(evalHistory) == 0 {
-			blocked.Block(testEval.eval)
-		} else {
-			i := int(unblockIdx) % len(evalHistory)
-			eval := evalHistory[i]
-			blocked.Untrack(eval.JobID, eval.Namespace)
-		}
-
-		// Remove zero stats from unblocked evals.
-		blocked.pruneStats(time.Now().UTC())
-
-		result := blocked.Stats().BlockedResources
-		clearTimestampFromBlockedResourceStats(&result)
-		return result
+func TestBlockResourceSummary_Add_nil(t *testing.T) {
+	now1 := now(1)
+	b := &BlockedResourcesSummary{
+		Timestamp: now1,
+		CPU:       250,
+		MemoryMB:  128,
 	}
 
-	// manualCount processes only the blocked evals and generate a
-	// BlockedResourcesStats result directly from the eval history.
-	manualCount := func(testEval testBlockedEvalsRandomBlockedEval, block bool, unblockIdx uint16) BlockedResourcesStats {
-		if block || len(evalHistory) == 0 {
-			evalHistory = append(evalHistory, testEval.eval)
-			blockedEvals[testEval.eval.ID] = true
-		} else {
-			i := int(unblockIdx) % len(evalHistory)
-			eval := evalHistory[i]
-			blockedEvals[eval.ID] = false
-		}
+	// zero + b == b
+	result := (*BlockedResourcesSummary)(nil).Add(b)
+	require.Equal(t, now1, result.Timestamp)
+	require.Equal(t, 250, result.CPU)
+	require.Equal(t, 128, result.MemoryMB)
+}
 
-		result := NewBlockedResourcesStats()
-		for _, e := range evalHistory {
-			if !blockedEvals[e.ID] {
-				continue
-			}
-			result = result.Add(generateResourceStats(e))
-		}
-		clearTimestampFromBlockedResourceStats(&result)
-		return result
+func TestBlockResourceSummary_Subtract(t *testing.T) {
+	now1 := now(1)
+	now2 := now(2)
+	a := &BlockedResourcesSummary{
+		Timestamp: now1,
+		CPU:       600,
+		MemoryMB:  256,
 	}
 
-	err := quick.CheckEqual(blockAndUntrack, manualCount, nil)
-	if err != nil {
-		t.Error(err)
+	b := &BlockedResourcesSummary{
+		Timestamp: now2,
+		CPU:       250,
+		MemoryMB:  120,
 	}
+
+	result := a.Subtract(b)
+
+	// a not modified
+	require.Equal(t, 600, a.CPU)
+	require.Equal(t, 256, a.MemoryMB)
+	require.Equal(t, now1, a.Timestamp)
+
+	// b not modified
+	require.Equal(t, 250, b.CPU)
+	require.Equal(t, 120, b.MemoryMB)
+	require.Equal(t, now2, b.Timestamp)
+
+	// result is a + b, using timestamp from b
+	require.Equal(t, 350, result.CPU)
+	require.Equal(t, 136, result.MemoryMB)
+	require.Equal(t, now2, result.Timestamp)
+}
+
+func TestBlockResourceSummary_IsZero(t *testing.T) {
+	now1 := now(1)
+
+	// cpu and mem zero, timestamp is ignored
+	require.True(t, (&BlockedResourcesSummary{
+		Timestamp: now1,
+		CPU:       0,
+		MemoryMB:  0,
+	}).IsZero())
+
+	// cpu non-zero
+	require.False(t, (&BlockedResourcesSummary{
+		Timestamp: now1,
+		CPU:       1,
+		MemoryMB:  0,
+	}).IsZero())
+
+	// mem non-zero
+	require.False(t, (&BlockedResourcesSummary{
+		Timestamp: now1,
+		CPU:       0,
+		MemoryMB:  1,
+	}).IsZero())
+}
+
+func TestBlockResourceStats_New(t *testing.T) {
+	a := NewBlockedResourcesStats()
+	require.NotNil(t, a.ByJob)
+	require.Empty(t, a.ByJob)
+	require.NotNil(t, a.ByNode)
+	require.Empty(t, a.ByNode)
+}
+
+var (
+	id1 = structs.NamespacedID{
+		ID:        "1",
+		Namespace: "one",
+	}
+
+	id2 = structs.NamespacedID{
+		ID:        "2",
+		Namespace: "two",
+	}
+
+	node1 = node{
+		dc:    "dc1",
+		class: "alpha",
+	}
+
+	node2 = node{
+		dc:    "dc1",
+		class: "beta",
+	}
+)
+
+func TestBlockResourceStats_Copy(t *testing.T) {
+	now1 := now(1)
+
+	a := NewBlockedResourcesStats()
+	a.ByJob = map[structs.NamespacedID]*BlockedResourcesSummary{
+		id1: {
+			Timestamp: now1,
+			CPU:       100,
+			MemoryMB:  256,
+		},
+	}
+	a.ByNode = map[node]*BlockedResourcesSummary{
+		node1: {
+			Timestamp: now1,
+			CPU:       300,
+			MemoryMB:  333,
+		},
+	}
+
+	c := a.Copy()
+	c.ByJob[id1].CPU = 999
+	c.ByNode[node1].CPU = 999
+
+	require.Equal(t, 100, a.ByJob[id1].CPU)
+	require.Equal(t, 300, a.ByNode[node1].CPU)
+}
+
+func TestBlockResourcesStats_Add(t *testing.T) {
+	a := NewBlockedResourcesStats()
+	a.ByJob = map[structs.NamespacedID]*BlockedResourcesSummary{
+		id1: {Timestamp: now(1), CPU: 111, MemoryMB: 222},
+	}
+	a.ByNode = map[node]*BlockedResourcesSummary{
+		node1: {Timestamp: now(2), CPU: 333, MemoryMB: 444},
+	}
+
+	b := NewBlockedResourcesStats()
+	b.ByJob = map[structs.NamespacedID]*BlockedResourcesSummary{
+		id1: {Timestamp: now(3), CPU: 200, MemoryMB: 300},
+		id2: {Timestamp: now(4), CPU: 400, MemoryMB: 500},
+	}
+	b.ByNode = map[node]*BlockedResourcesSummary{
+		node1: {Timestamp: now(5), CPU: 600, MemoryMB: 700},
+		node2: {Timestamp: now(6), CPU: 800, MemoryMB: 900},
+	}
+
+	t.Run("a add b", func(t *testing.T) {
+		result := a.Add(b)
+
+		require.Equal(t, map[structs.NamespacedID]*BlockedResourcesSummary{
+			id1: {Timestamp: now(3), CPU: 311, MemoryMB: 522},
+			id2: {Timestamp: now(4), CPU: 400, MemoryMB: 500},
+		}, result.ByJob)
+
+		require.Equal(t, map[node]*BlockedResourcesSummary{
+			node1: {Timestamp: now(5), CPU: 933, MemoryMB: 1144},
+			node2: {Timestamp: now(6), CPU: 800, MemoryMB: 900},
+		}, result.ByNode)
+	})
+
+	// make sure we handle zeros in both directions
+	// and timestamps originate from rhs
+	t.Run("b add a", func(t *testing.T) {
+		result := b.Add(a)
+		require.Equal(t, map[structs.NamespacedID]*BlockedResourcesSummary{
+			id1: {Timestamp: now(1), CPU: 311, MemoryMB: 522},
+			id2: {Timestamp: now(4), CPU: 400, MemoryMB: 500},
+		}, result.ByJob)
+
+		require.Equal(t, map[node]*BlockedResourcesSummary{
+			node1: {Timestamp: now(2), CPU: 933, MemoryMB: 1144},
+			node2: {Timestamp: now(6), CPU: 800, MemoryMB: 900},
+		}, result.ByNode)
+	})
+}
+
+func TestBlockedResourcesStats_Subtract(t *testing.T) {
+	a := NewBlockedResourcesStats()
+	a.ByJob = map[structs.NamespacedID]*BlockedResourcesSummary{
+		id1: {Timestamp: now(1), CPU: 100, MemoryMB: 100},
+		id2: {Timestamp: now(2), CPU: 200, MemoryMB: 200},
+	}
+	a.ByNode = map[node]*BlockedResourcesSummary{
+		node1: {Timestamp: now(3), CPU: 300, MemoryMB: 300},
+		node2: {Timestamp: now(4), CPU: 400, MemoryMB: 400},
+	}
+
+	b := NewBlockedResourcesStats()
+	b.ByJob = map[structs.NamespacedID]*BlockedResourcesSummary{
+		id1: {Timestamp: now(5), CPU: 10, MemoryMB: 11},
+		id2: {Timestamp: now(6), CPU: 12, MemoryMB: 13},
+	}
+	b.ByNode = map[node]*BlockedResourcesSummary{
+		node1: {Timestamp: now(7), CPU: 14, MemoryMB: 15},
+		node2: {Timestamp: now(8), CPU: 16, MemoryMB: 17},
+	}
+
+	result := a.Subtract(b)
+
+	// id1
+	require.Equal(t, now(5), result.ByJob[id1].Timestamp)
+	require.Equal(t, 90, result.ByJob[id1].CPU)
+	require.Equal(t, 89, result.ByJob[id1].MemoryMB)
+
+	// id2
+	require.Equal(t, now(6), result.ByJob[id2].Timestamp)
+	require.Equal(t, 188, result.ByJob[id2].CPU)
+	require.Equal(t, 187, result.ByJob[id2].MemoryMB)
+
+	// node1
+	require.Equal(t, now(7), result.ByNode[node1].Timestamp)
+	require.Equal(t, 286, result.ByNode[node1].CPU)
+	require.Equal(t, 285, result.ByNode[node1].MemoryMB)
+
+	// node2
+	require.Equal(t, now(8), result.ByNode[node2].Timestamp)
+	require.Equal(t, 384, result.ByNode[node2].CPU)
+	require.Equal(t, 383, result.ByNode[node2].MemoryMB)
 }
