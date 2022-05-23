@@ -111,7 +111,7 @@ func (sv *SecureVariables) Upsert(
 	return nil
 }
 
-// Delete removes a singlesecure variable, as specified by its namespace and
+// Delete removes a single secure variable, as specified by its namespace and
 // path from Nomad. This is typically called by Nomad nodes, however, in extreme
 // situations can be used via the CLI and API by operators.
 func (sv *SecureVariables) Delete(
