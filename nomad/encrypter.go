@@ -14,7 +14,6 @@ import (
 
 	// note: this is aliased so that it's more noticeable if someone
 	// accidentally swaps it out for math/rand via running goimports
-	cryptorand "crypto/rand"
 
 	"golang.org/x/crypto/chacha20poly1305"
 
@@ -31,11 +30,8 @@ type Encrypter struct {
 
 // TODO: needs Config parameter and error return
 func NewEncrypter() *Encrypter {
-	err := os.MkdirAll("/var/nomad/server/keystore", 0700)
-	if err != nil {
-		panic(err) // TODO
-	}
-	encrypter, err := encrypterFromKeystore("/var/nomad/server/keystore")
+	keystorePath := os.TempDir()
+	encrypter, err := encrypterFromKeystore(keystorePath)
 	if err != nil {
 		panic(err) // TODO
 	}
@@ -46,6 +42,7 @@ func encrypterFromKeystore(keystoreDirectory string) (*Encrypter, error) {
 
 	encrypter := &Encrypter{
 		ciphers:      make(map[string]cipher.AEAD),
+		keys:         make(map[string]*structs.RootKey),
 		keystorePath: keystoreDirectory,
 	}
 
@@ -107,34 +104,6 @@ func (e *Encrypter) Decrypt(encryptedData []byte, keyID string) ([]byte, error) 
 
 	// TODO: actually decrypt!
 	return encryptedData, nil
-}
-
-// GenerateKey returns a new root key and its metadata.
-func (e *Encrypter) GenerateKey(algorithm structs.EncryptionAlgorithm) (*structs.RootKey, error) {
-	meta := structs.NewRootKeyMeta()
-	meta.Algorithm = algorithm
-
-	rootKey := &structs.RootKey{
-		Meta: meta,
-	}
-
-	switch algorithm {
-	case structs.EncryptionAlgorithmAES256GCM:
-		key := make([]byte, 32)
-		if _, err := cryptorand.Read(key); err != nil {
-			return nil, err
-		}
-		rootKey.Key = key
-
-	case structs.EncryptionAlgorithmXChaCha20:
-		key := make([]byte, chacha20poly1305.KeySize)
-		if _, err := cryptorand.Read(key); err != nil {
-			return nil, err
-		}
-		rootKey.Key = key
-	}
-
-	return rootKey, nil
 }
 
 // AddKey stores the key in the keyring and creates a new cipher for it.

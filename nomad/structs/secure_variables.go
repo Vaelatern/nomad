@@ -4,6 +4,12 @@ import (
 	"fmt"
 	"time"
 
+	// note: this is aliased so that it's more noticeable if someone
+	// accidentally swaps it out for math/rand via running goimports
+	cryptorand "crypto/rand"
+
+	"golang.org/x/crypto/chacha20poly1305"
+
 	"github.com/hashicorp/nomad/helper"
 	"github.com/hashicorp/nomad/helper/uuid"
 )
@@ -143,6 +149,34 @@ type SecureVariablesDeleteResponse struct {
 type RootKey struct {
 	Meta *RootKeyMeta
 	Key  []byte // serialized to keystore as base64 blob
+}
+
+// NewRootKey returns a new root key and its metadata.
+func NewRootKey(algorithm EncryptionAlgorithm) (*RootKey, error) {
+	meta := NewRootKeyMeta()
+	meta.Algorithm = algorithm
+
+	rootKey := &RootKey{
+		Meta: meta,
+	}
+
+	switch algorithm {
+	case EncryptionAlgorithmAES256GCM:
+		key := make([]byte, 32)
+		if _, err := cryptorand.Read(key); err != nil {
+			return nil, err
+		}
+		rootKey.Key = key
+
+	case EncryptionAlgorithmXChaCha20:
+		key := make([]byte, chacha20poly1305.KeySize)
+		if _, err := cryptorand.Read(key); err != nil {
+			return nil, err
+		}
+		rootKey.Key = key
+	}
+
+	return rootKey, nil
 }
 
 // RootKeyMeta is the metadata used to refer to a RootKey. It is

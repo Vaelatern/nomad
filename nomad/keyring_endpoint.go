@@ -41,7 +41,7 @@ func (k *Keyring) Rotate(args *structs.KeyringRotateRootKeyRequest, reply *struc
 		args.Algorithm = structs.EncryptionAlgorithmXChaCha20
 	}
 
-	rootKey, err := k.encrypter.GenerateKey(args.Algorithm)
+	rootKey, err := structs.NewRootKey(args.Algorithm)
 	if err != nil {
 		return err
 	}
