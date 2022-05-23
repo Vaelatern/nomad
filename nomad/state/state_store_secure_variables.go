@@ -23,7 +23,7 @@ func (s *StateStore) SecureVariables(ws memdb.WatchSet) (memdb.ResultIterator, e
 }
 
 // GetSecureVariablesByNamespace returns an iterator that contains all
-// registrations belonging to the provided namespace.
+// variables belonging to the provided namespace.
 func (s *StateStore) GetSecureVariablesByNamespace(
 	ws memdb.WatchSet, namespace string) (memdb.ResultIterator, error) {
 	txn := s.db.ReadTxn()
@@ -38,8 +38,8 @@ func (s *StateStore) GetSecureVariablesByNamespace(
 	return iter, nil
 }
 
-// GetSecureVariablesByNamespace returns an iterator that contains all
-// registrations belonging to the provided namespace.
+// GetSecureVariablesByNamespaceAndPrefix returns an iterator that contains all
+// variables belonging to the provided namespace that match the prefix.
 func (s *StateStore) GetSecureVariablesByNamespaceAndPrefix(
 	ws memdb.WatchSet, namespace, prefix string) (memdb.ResultIterator, error) {
 	txn := s.db.ReadTxn()
@@ -196,7 +196,7 @@ func (s *StateStore) DeleteSecureVariable(index uint64, namespace, path string) 
 // DeleteSecureVariableTxn is used to delete the secure variable, like DeleteSecureVariable
 // but in a transaction.  Useful for when making multiple modifications atomically
 func (s *StateStore) DeleteSecureVariableTxn(index uint64, namespace, path string, txn Txn) error {
-	// Lookup the launch
+	// Lookup the variable
 	existing, err := txn.First(TableSecureVariables, indexID, namespace, path)
 	if err != nil {
 		return fmt.Errorf("secure variable lookup failed: %v", err)
