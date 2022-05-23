@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	// note: this is aliased so that it's more noticeable if someone
 	// accidentally swaps it out for math/rand via running goimports
@@ -17,54 +18,44 @@ import (
 
 	"golang.org/x/crypto/chacha20poly1305"
 
-	"github.com/hashicorp/nomad/api"
 	"github.com/hashicorp/nomad/helper"
 	"github.com/hashicorp/nomad/nomad/structs"
 )
 
 type Encrypter struct {
-	ciphers      map[string]cipher.AEAD // map of key IDs to ciphers
+	lock         sync.RWMutex
+	keys         map[string]*structs.RootKey // map of key IDs to key material
+	ciphers      map[string]cipher.AEAD      // map of key IDs to ciphers
 	keystorePath string
 }
 
+// TODO: needs Config parameter and error return
 func NewEncrypter() *Encrypter {
-	// TODO
 	err := os.MkdirAll("/var/nomad/server/keystore", 0700)
 	if err != nil {
 		panic(err) // TODO
 	}
-
 	encrypter, err := encrypterFromKeystore("/var/nomad/server/keystore")
 	if err != nil {
 		panic(err) // TODO
 	}
-
 	return encrypter
-}
-
-func validateKeyFromStore(rootKey *api.RootKey, id string) error {
-	// TODO: how much of these can we reuse from (*Keyring).validateUpdate ?
-	if rootKey == nil {
-		return fmt.Errorf("root key envelope is missing")
-	}
-	if rootKey.Meta == nil {
-		return fmt.Errorf("root key metadata is required")
-	}
-	if rootKey.Meta.KeyID == "" || rootKey.Meta.KeyID != id {
-		return fmt.Errorf("root key UUID is required and must match key file")
-	}
-	if rootKey.Meta.Algorithm == "" {
-		return fmt.Errorf("algorithm is required")
-	}
-	return nil
 }
 
 func encrypterFromKeystore(keystoreDirectory string) (*Encrypter, error) {
 
-	ciphers := make(map[string]cipher.AEAD)
+	encrypter := &Encrypter{
+		ciphers:      make(map[string]cipher.AEAD),
+		keystorePath: keystoreDirectory,
+	}
 
-	loadKeyFromPath := func(path string) error {
-
+	err := filepath.Walk(keystoreDirectory, func(path string, info fs.FileInfo, err error) error {
+		if err != nil {
+			return fmt.Errorf("could not read path %s from keystore: %v", path, err)
+		}
+		if info.IsDir() {
+			return filepath.SkipDir
+		}
 		// skip over non-key files; they shouldn't be here but there's
 		// no reason to fail startup for it if the administrator has
 		// left something there
@@ -75,57 +66,17 @@ func encrypterFromKeystore(keystoreDirectory string) (*Encrypter, error) {
 		if !helper.IsUUID(id) {
 			return nil
 		}
-
-		raw, err := os.ReadFile(path)
-		if err != nil {
-			return err
-		}
-		var rootKey *api.RootKey
-		if err := json.Unmarshal(raw, rootKey); err != nil {
-			return err
-		}
-		if err := validateKeyFromStore(rootKey, id); err != nil {
-			return err
-		}
-
-		key := make([]byte, base64.StdEncoding.DecodedLen(len(rootKey.Key)))
-		_, err = base64.StdEncoding.Decode(key, []byte(rootKey.Key))
-		if err != nil {
-			return fmt.Errorf("could not decode key: %v", err)
-		}
-
-		switch rootKey.Meta.Algorithm {
-		case api.EncryptionAlgorithmAES256GCM:
-			block, err := aes.NewCipher(key)
-			if err != nil {
-				return fmt.Errorf("could not create cipher: %v", err)
-			}
-			aead, err := cipher.NewGCM(block)
-			if err != nil {
-				return fmt.Errorf("could not create cipher: %v", err)
-			}
-			ciphers[rootKey.Meta.KeyID] = aead
-		case api.EncryptionAlgorithmXChaCha20:
-			aead, err := chacha20poly1305.NewX(key)
-			if err != nil {
-				return fmt.Errorf("could not create cipher: %v", err)
-			}
-			ciphers[rootKey.Meta.KeyID] = aead
-		}
-
-		return nil
-	}
-
-	err := filepath.Walk(keystoreDirectory, func(path string, info fs.FileInfo, err error) error {
-		if err != nil {
-			return fmt.Errorf("could not read path %s from keystore: %v", path, err)
-		}
-		if info.IsDir() {
-			return filepath.SkipDir
-		}
-		err = loadKeyFromPath(path)
+		key, err := encrypter.LoadKeyFromStore(path)
 		if err != nil {
 			return fmt.Errorf("could not load key file %s from keystore: %v", path, err)
+		}
+		if key.Meta.KeyID != id {
+			return fmt.Errorf("root key ID %s must match key file %s", key.Meta.KeyID, path)
+		}
+
+		err = encrypter.AddKey(key)
+		if err != nil {
+			return fmt.Errorf("could not add key file %s to keystore: %v", path, err)
 		}
 		return nil
 	})
@@ -133,10 +84,7 @@ func encrypterFromKeystore(keystoreDirectory string) (*Encrypter, error) {
 		return nil, err
 	}
 
-	return &Encrypter{
-		ciphers:      ciphers,
-		keystorePath: keystoreDirectory,
-	}, nil
+	return encrypter, nil
 }
 
 // Encrypt takes the serialized map[string][]byte from
@@ -144,6 +92,9 @@ func encrypterFromKeystore(keystoreDirectory string) (*Encrypter, error) {
 // for the algorithm, and encrypts the data with the ciper for the
 // CurrentRootKeyID. The buffer returned includes the nonce.
 func (e *Encrypter) Encrypt(unencryptedData []byte, keyID string) []byte {
+	e.lock.RLock()
+	defer e.lock.RUnlock()
+
 	// TODO: actually encrypt!
 	return unencryptedData
 }
@@ -151,12 +102,15 @@ func (e *Encrypter) Encrypt(unencryptedData []byte, keyID string) []byte {
 // Decrypt takes an encrypted buffer and then root key ID. It extracts
 // the nonce, decrypts the content, and returns the cleartext data.
 func (e *Encrypter) Decrypt(encryptedData []byte, keyID string) ([]byte, error) {
+	e.lock.RLock()
+	defer e.lock.RUnlock()
+
 	// TODO: actually decrypt!
 	return encryptedData, nil
 }
 
-// GenerateNewRootKey returns a new root key and its metadata.
-func (e *Encrypter) GenerateNewRootKey(algorithm structs.EncryptionAlgorithm) (*structs.RootKey, error) {
+// GenerateKey returns a new root key and its metadata.
+func (e *Encrypter) GenerateKey(algorithm structs.EncryptionAlgorithm) (*structs.RootKey, error) {
 	meta := structs.NewRootKeyMeta()
 	meta.Algorithm = algorithm
 
@@ -183,15 +137,114 @@ func (e *Encrypter) GenerateNewRootKey(algorithm structs.EncryptionAlgorithm) (*
 	return rootKey, nil
 }
 
-func (e *Encrypter) PersistRootKey(rootKey *structs.RootKey) error {
+// AddKey stores the key in the keyring and creates a new cipher for it.
+func (e *Encrypter) AddKey(rootKey *structs.RootKey) error {
+
+	if rootKey.Meta == nil {
+		return fmt.Errorf("missing metadata")
+	}
+	var aead cipher.AEAD
+	var err error
+
+	switch rootKey.Meta.Algorithm {
+	case structs.EncryptionAlgorithmAES256GCM:
+		block, err := aes.NewCipher(rootKey.Key)
+		if err != nil {
+			return fmt.Errorf("could not create cipher: %v", err)
+		}
+		aead, err = cipher.NewGCM(block)
+		if err != nil {
+			return fmt.Errorf("could not create cipher: %v", err)
+		}
+	case structs.EncryptionAlgorithmXChaCha20:
+		aead, err = chacha20poly1305.NewX(rootKey.Key)
+		if err != nil {
+			return fmt.Errorf("could not create cipher: %v", err)
+		}
+	default:
+		return fmt.Errorf("invalid algorithm %s", rootKey.Meta.Algorithm)
+	}
+
+	e.lock.Lock()
+	defer e.lock.Unlock()
+	e.ciphers[rootKey.Meta.KeyID] = aead
+	e.keys[rootKey.Meta.KeyID] = rootKey
+	return nil
+}
+
+// GetKey retrieves the key material by ID from the keyring
+func (e *Encrypter) GetKey(keyID string) ([]byte, error) {
+	e.lock.RLock()
+	defer e.lock.RUnlock()
+
+	key, ok := e.keys[keyID]
+	if !ok {
+		return []byte{}, fmt.Errorf("no such key %s in keyring", keyID)
+	}
+	return key.Key, nil
+}
+
+// RemoveKey removes a key by ID from the keyring
+func (e *Encrypter) RemoveKey(keyID string) error {
+	// TODO: should the server remove the serialized file here?
+	// TODO: given that it's irreverislbe, should the server *ever*
+	// remove the serialized file?
+	e.lock.Lock()
+	defer e.lock.Unlock()
+	delete(e.ciphers, keyID)
+	delete(e.keys, keyID)
+	return nil
+}
+
+// SaveKeyToStore serializes a root key to the on-disk keystore.
+func (e *Encrypter) SaveKeyToStore(rootKey *structs.RootKey) error {
 	buf, err := json.Marshal(rootKey)
 	if err != nil {
 		return err
 	}
 	path := filepath.Join(e.keystorePath, rootKey.Meta.KeyID+".json")
-	err = os.WriteFile(path, buf, 0700)
+	err = os.WriteFile(path, buf, 0600)
 	if err != nil {
 		return err
 	}
 	return nil
+}
+
+// LoadKeyFromStore deserializes a root key from disk.
+func (e *Encrypter) LoadKeyFromStore(path string) (*structs.RootKey, error) {
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+
+	storedKey := &struct {
+		Meta *structs.RootKeyMetaStub
+		Key  string
+	}{}
+	var rootKey *structs.RootKey
+	if err := json.Unmarshal(raw, storedKey); err != nil {
+		return nil, err
+	}
+	meta := &structs.RootKeyMeta{
+		Active:     storedKey.Meta.Active,
+		KeyID:      storedKey.Meta.KeyID,
+		Algorithm:  storedKey.Meta.Algorithm,
+		CreateTime: storedKey.Meta.CreateTime,
+	}
+	if err = meta.Validate(); err != nil {
+		return nil, err
+	}
+
+	key := make([]byte, base64.StdEncoding.DecodedLen(len(rootKey.Key)))
+	_, err = base64.StdEncoding.Decode(key, []byte(rootKey.Key))
+	if err != nil {
+		return nil, fmt.Errorf("could not decode key: %v", err)
+	}
+
+	return &structs.RootKey{
+		Meta: meta,
+		Key:  key,
+	}, nil
+
 }

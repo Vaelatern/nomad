@@ -1,8 +1,10 @@
 package structs
 
 import (
+	"fmt"
 	"time"
 
+	"github.com/hashicorp/nomad/helper"
 	"github.com/hashicorp/nomad/helper/uuid"
 )
 
@@ -164,12 +166,49 @@ func NewRootKeyMeta() *RootKeyMeta {
 	}
 }
 
+// RootKeyMetaStub is for serializing root key metadata to the
+// keystore, not for the List API. It excludes frequently-changing
+// fields such as EncryptionsCount or ModifyIndex so we don't have to
+// sync them to the on-disk keystore when the fields are already in
+// raft.
+type RootKeyMetaStub struct {
+	KeyID      string
+	Algorithm  EncryptionAlgorithm
+	CreateTime time.Time
+	Active     bool
+}
+
+func (rkm *RootKeyMeta) Stub() *RootKeyMetaStub {
+	if rkm == nil {
+		return nil
+	}
+	return &RootKeyMetaStub{
+		KeyID:      rkm.KeyID,
+		Algorithm:  rkm.Algorithm,
+		CreateTime: rkm.CreateTime,
+		Active:     rkm.Active,
+	}
+}
+
 func (rkm *RootKeyMeta) Copy() *RootKeyMeta {
 	if rkm == nil {
 		return nil
 	}
 	out := *rkm
 	return &out
+}
+
+func (rkm *RootKeyMeta) Validate() error {
+	if rkm == nil {
+		return fmt.Errorf("root key metadata is required")
+	}
+	if rkm.KeyID == "" || !helper.IsUUID(rkm.KeyID) {
+		return fmt.Errorf("root key UUID is required")
+	}
+	if rkm.Algorithm == "" {
+		return fmt.Errorf("root key algorithm is required")
+	}
+	return nil
 }
 
 // EncryptionAlgorithm chooses which algorithm is used for

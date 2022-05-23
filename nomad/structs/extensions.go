@@ -80,22 +80,22 @@ func csiVolumeExt(v interface{}) interface{} {
 	return apiVol
 }
 
-// rootKeyExt does the base64 encoding of the key material before we
-// serialize root key
+// rootKeyExt safely serializes a RootKey by base64 encoding the key
+// material and extracting the metadata stub. We only store the root
+// key in the keystore and never in raft or return it via the API, so
+// by having this extension as the default we make it slightly harder
+// to misuse.
 func rootKeyExt(v interface{}) interface{} {
 	key := v.(*RootKey)
 
 	encodedKey := make([]byte, base64.StdEncoding.EncodedLen(len(key.Key)))
 	base64.StdEncoding.Encode(encodedKey, key.Key)
 
-	// we can use RootKeyMeta here without indirection so long as its
-	// fields exactly match api.RootKeyMeta; if that changes we'll
-	// need to rework this to be similar to CSIVolume and Node above.
 	return &struct {
-		Meta *RootKeyMeta
+		Meta *RootKeyMetaStub
 		Key  string
 	}{
-		Meta: key.Meta,
+		Meta: key.Meta.Stub(),
 		Key:  string(encodedKey),
 	}
 }
